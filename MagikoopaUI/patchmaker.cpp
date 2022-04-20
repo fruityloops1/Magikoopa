@@ -135,7 +135,7 @@ void PatchMaker::loaderCompilerDone(int exitCode)
         quint32 loaderInsertSize = m_loaderSymTable.get("__text_end") - m_loaderSymTable.get("__text_start") + m_loaderHookLinker.extraDataSize();
         if (loaderInsertSize > m_loaderMaxSize)
         {
-            emit updateStatus("Loader text size exeeds maximum");
+            emit updateStatus("Loader text size exceeds maximum");
             emit setBusy(false);
             return;
         }
@@ -227,7 +227,7 @@ void PatchMaker::insert()
     loaderFile->readData(loaderText, loaderTextSize);
     codeFile->seek(m_loaderOffset - 0x100000);
     codeFile->writeData(loaderText, loaderTextSize);
-    delete loaderText;
+    delete[] loaderText;
 
     // Clear BSS section
     codeFile->seek(oldCodeSize);

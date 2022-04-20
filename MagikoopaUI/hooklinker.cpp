@@ -1,33 +1,75 @@
 #include "hooklinker.h"
+#include "hooks.h"
 
-#include <QDirIterator>
 #include <QDebug>
+#include <QDirIterator>
 #include <QMessageBox>
+#include <cctype>
+#include <iostream>
 
-Hook* HookLinker::hookFromInfo(HookInfo* info)
+Hook* HookLinker::hookFromData(quint32 address, const QString& data)
 {
-    if (!info->has("type"))
-        throw new HookExeption(info, "No type given");
+    if (data.startsWith("pb") || data.startsWith("prb") || data.startsWith("pib")) {
+        QString branchType = data.split(QRegExp("\\s+"), QString::SkipEmptyParts)[0];
+        SoftBranchHook::Opcode_Pos opcode = SoftBranchHook::Opcode_Post;
 
-    QString type = info->get("type").toLower();
+        QStringList dataTmp = data.split(' ');
+        dataTmp.removeAt(0);
+        QString symbol = dataTmp.join(' ');
 
-    if (type == "branch")
-        return new BranchHook(this, info);
-    else if (type == "softbranch" || type == "soft_branch")
-        return new SoftBranchHook(this, info);
-    else if (type == "patch")
-        return new PatchHook(this, info);
-    else if (type == "symbol" || type == "symptr" || type == "sym_ptr")
-        return new SymbolAddrPatchHook(this, info);
-    else
-        throw new HookExeption(info, QString("Invalid type \"%1\"").arg(type));
+        if (branchType.startsWith("pb"))
+            opcode = SoftBranchHook::Opcode_Pos::Opcode_Post;
+        else if (branchType.startsWith("prb"))
+            opcode = SoftBranchHook::Opcode_Pos::Opcode_Pre;
+        else if (branchType.startsWith("pib"))
+            opcode = SoftBranchHook::Opcode_Pos::Opcode_Ignore;
+        return new SoftBranchHook(this, address, opcode, symbol);
+    } /*else if (QRegExp("(?:0[xX])?[0-9a-fA-F]+").indexIn(data.simplified().replace(" ", "")) != -1) {
+        return new PatchHook(this, address, data.simplified().replace(" ", ""));
+    } */
+    else if (data.startsWith("symdata")) {
+        QStringList dataTmp = data.split(' ');
+        dataTmp.removeAt(0);
+        dataTmp.removeAt(dataTmp.size() - 1);
+        QString symbol = dataTmp.join(' ');
+        dataTmp = data.split(' ');
+        dataTmp.removeAt(0);
 
-    delete info;
-    return NULL;
+        while (dataTmp.size() > 1)
+            dataTmp.removeAt(0);
+        QString lenStr = dataTmp[0];
+
+        bool ok = true;
+        quint32 len = 0;
+        if (lenStr.startsWith("0x"))
+            len = lenStr.mid(2).toUInt(&ok, 0x10);
+        len = lenStr.toUInt(&ok, 10);
+        if (!ok)
+            emit outputUpdate("Error: invalid length \"" + lenStr + "\"");
+
+        return new SymbolDataPatchHook(this, address, symbol, len);
+    } else if (data.startsWith("sym")) {
+        QStringList dataTmp = data.split(' ');
+        dataTmp.removeAt(0);
+        QString symbol = dataTmp.join(' ');
+        return new SymbolAddrPatchHook(this, address, symbol);
+    } else if (data.split(QRegExp("\\s+"), QString::SkipEmptyParts)[0].startsWith('b')) {
+        QString key = data.split(QRegExp("\\s+"), QString::SkipEmptyParts)[0].toLower();
+        BranchType type = branchStringToType[key];
+
+        QStringList dataTmp = data.split(' ');
+        dataTmp.removeAt(0);
+        QString symbol = dataTmp.join(' ');
+
+        return new BranchHook(this, address, symbol, type);
+    } else // put keystone assembler here later
+        throw new HookException("Could not parse line");
+
+    return nullptr;
 }
 
-
-HookLinker::HookLinker(QObject* parent) : QObject(parent)
+HookLinker::HookLinker(QObject* parent)
+    : QObject(parent)
 {
 
 }
@@ -82,38 +124,35 @@ void HookLinker::loadHooksFromFile(const QString& path)
         lineNbr++;
         QString line = s.readLine();
 
+        if (line == "")
+            continue;
+
         qint32 hashIndex = line.indexOf('#');
         if (hashIndex >= 0)
             line = line.left(hashIndex);
 
         // New Entry
-        if (!line.startsWith(' ') && !line.startsWith(' ') && line.contains(':'))
-        {
-            current = new HookInfo(line.left(line.indexOf(':')), path, lineNbr);
+        if (!line.startsWith(' ') && line.contains(':')) {
+            bool ok = true;
+            QString value = line.left(line.indexOf(':'));
+            quint32 addr;
+            if (value.startsWith("0x"))
+                addr = value.mid(2).toUInt(&ok, 0x10);
+            addr = value.toUInt(&ok, 0x10);
+            if (!ok)
+                emit outputUpdate("Error: invalid address \"" + value + "\"");
+            current = new HookInfo(addr, path, lineNbr);
             entries.append(current);
         }
 
         // Data
-        if (current != NULL && line.contains(':'))
-        {
-            if (!line.startsWith('\t') && !line.startsWith(' '))
-                continue;
-
+        else if (current != NULL) {
             while (line.startsWith('\t') || line.startsWith(' '))
                 line = line.mid(1);
-
-            int index = line.indexOf(':');
-
-            QString label = line.left(index);
-            line = line.mid(index + 1);
-
-            while (line.startsWith('\t') || line.startsWith(' '))
-                line = line.mid(1);
-
             while (line.endsWith('\t') || line.endsWith(' '))
                 line.chop(1);
 
-            current->values.insert(label, line);
+            current->data.push_back(line);
         }
     }
 
@@ -123,13 +162,17 @@ void HookLinker::loadHooksFromFile(const QString& path)
     {
         try
         {
-            Hook* hk = hookFromInfo(info);
-            if (hk) hooks.append(hk);
-        }
-        catch (HookExeption* e)
-        {
-            const HookInfo& info = e->info();
-            emit outputUpdate(info.path + ":" + QString::number(info.line) + ": error: Hook: " + e->msg());
+            quint32 address = info->address;
+            for (const QString& line : info->data) {
+                Hook* hk = hookFromData(address, line);
+                if (hk) {
+                    hooks.append(hk);
+                    address += hk->overwriteSize();
+                }
+            }
+            delete info;
+        } catch (HookException* e) {
+            emit outputUpdate("Error: Hook: " + e->msg());
         }
     }
 }

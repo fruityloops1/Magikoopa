@@ -44,74 +44,52 @@ quint32 Hook::offsetOpcode(quint32 opcode, quint32 orgPosition, qint32 newPositi
 
 Hook::~Hook()
 {
-    delete m_info;
 }
 
-void Hook::base(HookLinker* parent, HookInfo* info)
+void Hook::base(HookLinker* parent, quint32 address)
 {
     m_parent = parent;
-    m_info = info;
-
-    // TODO: Make this multi-region by adding region suffixes
-    //       If suffix does not exist fall back to "addr"
-
-    QString addrKey = "addr";
-
-    if (!info->has(addrKey))
-        throw new HookExeption(info, "No address given");
-
-    m_address = info->getUint("addr");
-
-    if (m_address < 0x100000)
-        throw new HookExeption(info, QString("Invalid address \"%1\"").arg(info->get("addr")));
+    m_address = address;
 }
 
-
-BranchHook::BranchHook(HookLinker* parent, HookInfo* info)
+BranchHook::BranchHook(HookLinker* parent, quint32 address, QString symbol, BranchType type)
 {
-    base(parent, info);
+    base(parent, address);
 
-    if (!info->has("link"))
-        throw new HookExeption(info, "Invalid branch link type");
-
-    m_link = info->getBool("link");
-
-    if (info->has("func"))
-    {
-        if (!parent->symTable())
-            throw new HookExeption(info, "Invalid SymTable");
-
-        bool ok;
-        m_destination = parent->symTable()->get(info->get("func"), &ok);
-
-        if (!ok)
-            throw new HookExeption(info, QString("Function name \"%1\" not found").arg(info->get("func")));
-    }
-    else
-    {
-        if (!info->has("dest"))
-            throw new HookExeption(info, "No branch destination given");
-
-        bool ok;
-        m_destination = info->getUint("dest", &ok);
-
-        if (!ok)
-            throw new HookExeption(info, QString("Invalid branch destination \"%1\"").arg(info->get("dest")));
-    }
+    bool ok = true;
+    m_destination = parent->symTable()->get(symbol, &ok);
+    if (!ok)
+        throw new HookException(QString("Function name \"%1\" not found").arg(symbol));
+    m_branchType = type;
 }
 
 void BranchHook::writeData(FileBase* file, quint32)
 {
     file->seek(m_address - 0x00100000);
-    file->write32(makeBranchOpcode(m_address, m_destination, m_link));
+
+    union {
+        struct {
+            signed int relAddr : 24;
+            quint8 type : 8;
+        };
+        quint32 data;
+    } conv { { static_cast<signed int>((m_destination - m_address - 8) / 4), (quint8)m_branchType } };
+
+    file->write32(conv.data);
 }
 
-
-SoftBranchHook::SoftBranchHook(HookLinker* parent, HookInfo* info)
+SoftBranchHook::SoftBranchHook(HookLinker* parent, quint32 address, Opcode_Pos opcode, const QString& symbol)
 {
-    base(parent, info);
+    base(parent, address);
+    m_opcodePos = opcode;
 
-    if (info->has("func"))
+    bool ok;
+    m_destination = parent->symTable()->get(symbol, &ok);
+
+    if (!ok)
+        throw new HookException(QString("Symbol name \"%1\" not found").arg(symbol));
+
+    /*if (info->has("func"))
     {
         if (!parent->symTable())
             throw new HookExeption(info, "Invalid SymTable");
@@ -147,7 +125,7 @@ SoftBranchHook::SoftBranchHook(HookLinker* parent, HookInfo* info)
             throw new HookExeption(info, QString("Invalid softHook opcode position \"%1\"").arg(info->get("opcode")));
     }
     else
-        m_opcodePos = Opcode_Ignore;
+        m_opcodePos = Opcode_Ignore;*/
 }
 
 void SoftBranchHook::writeData(FileBase* file, quint32 extraDataPtr)
@@ -166,86 +144,63 @@ void SoftBranchHook::writeData(FileBase* file, quint32 extraDataPtr)
     file->write32(makeBranchOpcode(file->pos() + 0x00100000, m_address + 4, false));
 }
 
-
-PatchHook::PatchHook(HookLinker* parent, HookInfo* info)
+PatchHook::PatchHook(HookLinker* parent, quint32 address, const QString& data)
 {
-    base(parent, info);
+    base(parent, address);
 
-    if (info->has("data"))
-    {
-        fromBin = false;
+    QString dataStr = data;
+    if (dataStr.startsWith("0x"))
+        dataStr = data.mid(2);
 
-        QString dataStr = info->get("data").toLower();
-        if (dataStr.startsWith("0x"))
-            dataStr = dataStr.mid(2);
+    dataStr.replace(' ', "");
+    dataStr.replace('\t', "");
 
-        dataStr.replace(' ',  "");
-        dataStr.replace('\t', "");
-
-        m_patchData = QByteArray::fromHex(dataStr.toLatin1());
-    }
-    else if (info->has("src") && info->has("len"))
-    {
-        fromBin = true;
-
-        if (!parent->symTable())
-            throw new HookExeption(info, "Invalid SymTable");
-
-        bool ok;
-        m_src = parent->symTable()->get(info->get("src"), &ok);
-
-        if (!ok)
-            throw new HookExeption(info, "Invalid src symbol");
-
-        m_len = info->getUint("len", &ok);
-
-        if (!ok)
-            throw new HookExeption(info, "Invalid length");
-
-
-    }
-    else
-        throw new HookExeption(info, "No patch data given");
+    m_patchData = QByteArray::fromHex(dataStr.toLatin1());
+    if (m_patchData.size() == 0)
+        throw new HookException("No patch data given");
 }
 
 void PatchHook::writeData(FileBase* file, quint32)
 {
-    if (!fromBin)
-    {
-        file->seek(m_address - 0x00100000);
-        file->writeData((quint8*)m_patchData.data(), m_patchData.size());
-    }
-    else
-    {
-        file->seek(m_src - 0x00100000);
-        quint8* writeData = new quint8[m_len];
-        file->readData(writeData, m_len);
-
-        file->seek(m_address - 0x00100000);
-        file->writeData(writeData, m_len);
-        delete[] writeData;
-    }
+    file->seek(m_address - 0x00100000);
+    file->writeData((quint8*)m_patchData.data(), m_patchData.size());
 }
 
-
-SymbolAddrPatchHook::SymbolAddrPatchHook(HookLinker* parent, HookInfo* info)
+SymbolAddrPatchHook::SymbolAddrPatchHook(HookLinker* parent, quint32 address, const QString& symbol)
 {
-    base(parent, info);
-
-    QString symKey = "sym";
-
-    if (!info->has(symKey))
-        throw new HookExeption(info, "No symbol given");
+    base(parent, address);
 
     bool ok;
-    m_destination = parent->symTable()->get(info->get(symKey), &ok);
+    m_destination = parent->symTable()->get(symbol, &ok);
 
     if (!ok)
-        throw new HookExeption(info, QString("Symbol name \"%1\" not found").arg(info->get(symKey)));
+        throw new HookException(QString("Symbol name \"%1\" not found").arg(symbol));
 }
 
 void SymbolAddrPatchHook::writeData(FileBase* file, quint32)
 {
     file->seek(m_address - 0x00100000);
     file->write32(m_destination);
+}
+
+SymbolDataPatchHook::SymbolDataPatchHook(HookLinker* parent, quint32 address, const QString& symbol, quint32 len)
+    : m_size(len)
+{
+    base(parent, address);
+
+    bool ok;
+    m_dataPtr = parent->symTable()->get(symbol, &ok);
+
+    if (!ok)
+        throw new HookException(QString("Symbol name \"%1\" not found").arg(symbol));
+}
+
+void SymbolDataPatchHook::writeData(FileBase* file, quint32)
+{
+    file->seek(m_dataPtr - 0x00100000);
+    quint8* writeData = new quint8[m_size];
+    file->readData(writeData, m_size);
+    file->seek(m_address);
+    file->writeData(writeData, m_size);
+    delete[] writeData;
 }
