@@ -112,7 +112,7 @@ class BranchHook : public Hook
 {
 public:
     BranchHook(HookLinker* parent, quint32 address, QString symbol, BranchType type);
-    void writeData(FileBase* file, quint32 extraDataPos);
+    void writeData(FileBase* file, quint32 extraDataPos) override;
     quint32 overwriteSize() override { return 4; }
 
 private:
@@ -169,6 +169,17 @@ public:
 private:
     quint32 m_dataPtr;
     quint32 m_size;
+};
+
+class AssemblerHook : public Hook {
+public:
+    AssemblerHook(HookLinker* parent, quint32 address, const QString& data);
+    void writeData(FileBase* file, quint32 extraDataPos) override;
+    quint32 overwriteSize() override { return m_size; }
+
+private:
+    quint8* m_data;
+    size_t m_size;
 };
 
 #endif // HOOKS_H

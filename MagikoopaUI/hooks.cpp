@@ -1,5 +1,6 @@
 #include "hooks.h"
 #include "hooklinker.h"
+#include "keystone/keystone.h"
 
 quint32 Hook::makeBranchOpcode(quint32 src, quint32 dest, bool link)
 {
@@ -203,4 +204,27 @@ void SymbolDataPatchHook::writeData(FileBase* file, quint32)
     file->seek(m_address);
     file->writeData(writeData, m_size);
     delete[] writeData;
+}
+
+AssemblerHook::AssemblerHook(HookLinker* parent, quint32 address, const QString& data)
+{
+    base(parent, address);
+    ks_engine* ks;
+    ks_err err = ks_open(KS_ARCH_ARM, KS_MODE_ARM, &ks);
+    if (err != KS_ERR_OK)
+        throw std::runtime_error("Failed initializing Keystone Engine");
+
+    size_t count = 1;
+    if (ks_asm(ks, data.toLatin1().constData(), m_address, &m_data, &m_size, &count) != KS_ERR_OK)
+        throw new HookException(QString().sprintf("Assembler failed to assemble '%s':%zu with message '%s'",
+            data.toLatin1().constData(), count, ks_strerror(ks_errno(ks))));
+    ks_close(ks);
+}
+
+void AssemblerHook::writeData(FileBase* file, quint32)
+{
+    file->seek(m_address - 0x00100000);
+    file->writeData(m_data, m_size);
+
+    ks_free(m_data);
 }

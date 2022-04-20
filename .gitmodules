@@ -1,0 +1,3 @@
+[submodule "MagikoopaUI/lib/keystone"]
+	path = MagikoopaUI/lib/keystone
+	url = https://github.com/keystone-engine/keystone

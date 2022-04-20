@@ -4,8 +4,13 @@
 #include <QDebug>
 #include <QDirIterator>
 #include <QMessageBox>
+#include <cassert>
 #include <cctype>
-#include <iostream>
+
+bool isStringHex(const QString& value)
+{
+    return QRegExp("^[0-9A-Fa-f]+$").indexIn(value.simplified().replace(" ", "")) != -1;
+}
 
 Hook* HookLinker::hookFromData(quint32 address, const QString& data)
 {
@@ -24,10 +29,9 @@ Hook* HookLinker::hookFromData(quint32 address, const QString& data)
         else if (branchType.startsWith("pib"))
             opcode = SoftBranchHook::Opcode_Pos::Opcode_Ignore;
         return new SoftBranchHook(this, address, opcode, symbol);
-    } /*else if (QRegExp("(?:0[xX])?[0-9a-fA-F]+").indexIn(data.simplified().replace(" ", "")) != -1) {
+    } else if ((data.toLower().startsWith("0x") && isStringHex(data.mid(2))) || isStringHex(data)) {
         return new PatchHook(this, address, data.simplified().replace(" ", ""));
-    } */
-    else if (data.startsWith("symdata")) {
+    } else if (data.startsWith("symdata")) {
         QStringList dataTmp = data.split(' ');
         dataTmp.removeAt(0);
         dataTmp.removeAt(dataTmp.size() - 1);
@@ -53,17 +57,24 @@ Hook* HookLinker::hookFromData(quint32 address, const QString& data)
         dataTmp.removeAt(0);
         QString symbol = dataTmp.join(' ');
         return new SymbolAddrPatchHook(this, address, symbol);
-    } else if (data.split(QRegExp("\\s+"), QString::SkipEmptyParts)[0].startsWith('b')) {
+    } else if (data.split(QRegExp("\\s+"), QString::SkipEmptyParts)[0].startsWith('b')
+        && !data.split(QRegExp("\\s+"), QString::SkipEmptyParts)[1].startsWith('#')) {
         QString key = data.split(QRegExp("\\s+"), QString::SkipEmptyParts)[0].toLower();
+
+        if (branchStringToType.find(key) == branchStringToType.end())
+            return new AssemblerHook(this, address, data);
         BranchType type = branchStringToType[key];
 
         QStringList dataTmp = data.split(' ');
         dataTmp.removeAt(0);
         QString symbol = dataTmp.join(' ');
 
+        if (symbol.startsWith("#") || isStringHex(symbol) || symbol.startsWith("0x"))
+            return new AssemblerHook(this, address, data);
         return new BranchHook(this, address, symbol, type);
-    } else // put keystone assembler here later
-        throw new HookException("Could not parse line");
+    } else {
+        return new AssemblerHook(this, address, data);
+    }
 
     return nullptr;
 }
@@ -124,12 +135,11 @@ void HookLinker::loadHooksFromFile(const QString& path)
         lineNbr++;
         QString line = s.readLine();
 
-        if (line == "")
+        if (line == "" || line.startsWith("//"))
             continue;
 
-        qint32 hashIndex = line.indexOf('#');
-        if (hashIndex >= 0)
-            line = line.left(hashIndex);
+        while (line.contains("//"))
+            line = line.left(line.indexOf("//"));
 
         // New Entry
         if (!line.startsWith(' ') && line.contains(':')) {
